@@ -7,10 +7,10 @@ import czsc
 from czsc.utils.kline_generator import KlineGeneratorByTick, KlineGeneratorBy1Min, RawBar
 from czsc.factors import CzscFactors
 from czsc.enum import Factors
-from czsc.utils.qywx import push_file, push_msg, push_text
+from czsc.utils.qywx import push_file, push_text
 import os
 
-assert czsc.__version__ == "0.6.5", "czsc 的版本必须等于 0.6.5"
+assert czsc.__version__ == '0.6.7', "请执行代码安装指定版本CZSC：pip install czsc==0.6.7"
 
 file_token = os.path.join(os.path.expanduser("~"), "gm_token.txt")
 
@@ -40,13 +40,16 @@ indices = {
 
 
 class GmTrader(CzscFactors):
-    def __init__(self, kg, factors):
+    def __init__(self, kg: KlineGeneratorBy1Min, factors):
         super().__init__(kg)
         self.long_open_factors = factors.get('long_open_factors', [])
         self.long_close_factors = factors.get('long_close_factors', [])
         self.short_open_factors = factors.get('short_open_factors', [])
-        self.short_close_factors = factors.get('short_open_factors', [])
+        self.short_close_factors = factors.get('short_close_factors', [])
         self.version = factors.get('version', str(datetime.now().date()))
+
+    def __repr__(self):
+        return "<GmTrader for {}>".format(self.symbol)
 
     def match_factors(self, factors):
         s = self.s
@@ -64,28 +67,32 @@ class GmTrader(CzscFactors):
         return res
 
     def long_open(self):
-        res = self.match_factors(self.long_open_factors)
-        if res['match']:
+        open_ = self.match_factors(self.long_open_factors)
+        close_ = self.match_factors(self.long_close_factors)
+        if open_['match'] and not close_['match']:
             self.cache['long_open_price'] = self.latest_price
-        return res
+        return open_
 
     def long_close(self):
-        res = self.match_factors(self.long_close_factors)
-        if res['match']:
+        open_ = self.match_factors(self.long_open_factors)
+        close_ = self.match_factors(self.long_close_factors)
+        if close_['match'] and not open_['match']:
             self.cache['long_open_price'] = self.cache['long_high'] = 0
-        return res
+        return close_
 
     def short_open(self):
-        res = self.match_factors(self.short_open_factors)
-        if res['match']:
+        open_ = self.match_factors(self.short_open_factors)
+        close_ = self.match_factors(self.short_close_factors)
+        if open_['match'] and not close_['match']:
             self.cache['short_open_price'] = self.latest_price
-        return res
+        return open_
 
     def short_close(self):
-        res = self.match_factors(self.short_close_factors)
-        if res['match']:
+        open_ = self.match_factors(self.short_open_factors)
+        close_ = self.match_factors(self.short_close_factors)
+        if close_['match'] and not open_['match']:
             self.cache['short_open_price'] = 0
-        return res
+        return close_
 
 
 def get_index_shares(name, end_date):
@@ -160,7 +167,6 @@ def on_order_status(context, order):
     else:
         if order.status in [1, 3]:
             push_text(content=str(msg), key=context.wx_key)
-            # push_msg(msg_type="text", content={"content": str(msg)}, key=context.wx_key)
 
 
 def on_execution_report(context, execrpt):
@@ -181,7 +187,6 @@ def on_execution_report(context, execrpt):
     logger.info(msg)
     if context.mode != MODE_BACKTEST:
         push_text(content=str(msg), key=context.wx_key)
-        # push_msg(msg_type="text", content={"content": str(msg)}, key=context.wx_key)
 
 
 def on_backtest_finished(context, indicator):
@@ -206,8 +211,6 @@ def on_backtest_finished(context, indicator):
         "研究标的": ", ".join(list(context.symbols_map.keys())),
         "回测开始时间": context.backtest_start_time,
         "回测结束时间": context.backtest_end_time,
-        "开多因子": context.symbols_map[symbol]['trader'].long_open_factors,
-        "平多因子": context.symbols_map[symbol]['trader'].long_close_factors,
         "累计收益率": indicator['pnl_ratio'],
         "最大回撤": indicator['max_drawdown'],
         "年化收益率": indicator['pnl_ratio_annual'],
@@ -220,13 +223,21 @@ def on_backtest_finished(context, indicator):
         "累计手续费": int(cash['cum_commission']),
         "累计平仓收益": int(cash['cum_pnl']),
         "净收益": int(cash['pnl']),
+        "因子版本": context.symbols_map[symbol]['trader'].version,
+        "开多因子": context.symbols_map[symbol]['trader'].long_open_factors,
+        "平多因子": context.symbols_map[symbol]['trader'].long_close_factors,
+        "开空因子": context.symbols_map[symbol]['trader'].short_open_factors,
+        "平空因子": context.symbols_map[symbol]['trader'].short_close_factors,
     })
     df = pd.DataFrame([row])
     df.to_excel(os.path.join(context.data_path, "回测结果.xlsx"), index=False)
     logger.info("回测结果：{}".format(row))
     content = ""
     for k, v in row.items():
-        content += "{}: {}\n".format(k, v)
+        if k not in ["开多因子", '平多因子', '开空因子', '平空因子']:
+            content += "{}: {}\n".format(k, v)
+
+    push_text(content=content, key=context.wx_key)
 
     for symbol in context.symbols:
         # 查看买卖详情
@@ -237,8 +248,6 @@ def on_backtest_finished(context, indicator):
             print(symbol, "\n", df.desc.value_counts())
             print(df)
 
-    push_text(content=content, key=context.wx_key)
-    # push_msg(msg_type='text', content={"content": content}, key=context.wx_key)
 
 def on_error(context, code, info):
     logger = context.logger
@@ -246,8 +255,6 @@ def on_error(context, code, info):
     logger.warn(msg)
     if context.mode != MODE_BACKTEST:
         push_text(content=msg, key=context.wx_key)
-        # push_msg(msg_type="text", content={"content": msg}, key=context.wx_key)
-
 
 def on_account_status(context, account):
     """响应交易账户状态更新事件，交易账户状态变化时被触发"""
@@ -341,8 +348,7 @@ def take_snapshot(context, trader, name):
     file_html = os.path.join(context.cache_path, f"{symbol}_{name}_{price}_{now_}.html")
     trader.take_snapshot(file_html, width="1400px", height="580px")
     if context.mode != MODE_BACKTEST:
-        file_name = "{}_{}_{}.html".format(symbol.split(".")[1], trader.latest_price, now_)
-        push_file(file_html, file_name, key=context.wx_key)
+        push_file(file_html, key=context.wx_key)
 
 
 def adjust_future_position(context, symbol, trader):
@@ -439,9 +445,15 @@ def adjust_share_position(context, symbol, trader):
             context.logger.info("{} - 开多 - {}".format(symbol, res['desc']))
             write_bs(context, symbol, res)
             if mp > 1:
+                if account.cash.available < mp * 100 * trader.latest_price:
+                    context.logger.info("{} - 开多信号触发 - {}；可用仓位不足，暂不开仓".format(symbol, res['desc']))
+                    return
                 order_volume(symbol=symbol, volume=mp * 100, side=OrderSide_Buy, order_type=OrderType_Market,
                              position_effect=PositionEffect_Open, account=account.id)
             else:
+                if account.cash.available / account.cash.nav < mp:
+                    context.logger.info("{} - 开多信号触发 - {}；可用仓位不足，暂不开仓".format(symbol, res['desc']))
+                    return
                 order_target_percent(symbol=symbol, percent=mp, position_side=PositionSide_Long,
                                      order_type=OrderType_Market, account=account.id)
             take_snapshot(context, trader, name=res['desc'])
@@ -475,56 +487,7 @@ def get_init_kg(context, symbol, generator: [KlineGeneratorByTick, KlineGenerato
             raise ValueError
 
         if data:
-            print("更新 kg 至实盘最新状态，共有{}行数据需要update".format(len(data)))
+            print("{}: 更新 kg 至实盘最新状态，共有{}行数据需要update".format(symbol, len(data)))
             for row in data:
                 kg.update(row)
     return kg
-
-
-def create_logger(log_file, name='logger', cmd=True, level="info"):
-    """define a logger for your program
-
-    parameters
-    ------------
-    log_file     file name of log
-    name         name of logger
-
-    example
-    ------------
-    logger = create_logger('example.log',name='logger',)
-    logger.info('This is an example!')
-    logger.warning('This is a warn!')
-
-    """
-    import logging
-
-    level_map = {
-        "info": logging.INFO,
-        "debug": logging.DEBUG,
-        "error": logging.ERROR,
-    }
-    log_level = level_map.get(level, logging.INFO)
-    logger = logging.getLogger(name)
-    logger.setLevel(log_level)
-
-    # set format
-    formatter = logging.Formatter('%(asctime)s | %(name)s | %(levelname)s | %(message)s',
-                                  datefmt='%Y-%m-%d %H:%M:%S')
-
-    # file handler
-    fh = logging.FileHandler(log_file, encoding="utf-8")
-    fh.setLevel(log_level)
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
-
-    # cmd handler
-    if cmd:
-        ch = logging.StreamHandler()
-        ch.setLevel(log_level)
-        ch.setFormatter(formatter)
-        logger.addHandler(ch)
-
-    return logger
-
-
-
